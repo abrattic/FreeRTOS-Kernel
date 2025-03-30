@@ -285,24 +285,24 @@
  * the task.  It is inserted at the end of the list.
  */
 
-#if (configUSE_EDF_SCHEDULER == 1)
+#if ( configUSE_EDF_SCHEDULER == 1 )
 
-#define prvAddTaskToReadyList( pxTCB )                                   \
-    do {                                                                 \
-        traceMOVED_TASK_TO_READY_STATE( pxTCB );                         \
-        vListInsert(&(xReadyTasksListEDF),&(( pxTCB )->xStateListItem)); \
-        tracePOST_MOVED_TASK_TO_READY_STATE( pxTCB );                    \
-    } while( 0 )
+    #define prvAddTaskToReadyList( pxTCB )                                          \
+        do {                                                                        \
+            traceMOVED_TASK_TO_READY_STATE( pxTCB );                                \
+            vListInsert( &( xReadyTasksListEDF ), &( ( pxTCB )->xStateListItem ) ); \
+            tracePOST_MOVED_TASK_TO_READY_STATE( pxTCB );                           \
+        } while( 0 )
 
 #else
 
-#define prvAddTaskToReadyList( pxTCB )                                                                     \
-    do {                                                                                                   \
-        traceMOVED_TASK_TO_READY_STATE( pxTCB );                                                           \
-        taskRECORD_READY_PRIORITY( ( pxTCB )->uxPriority );                                                \
-        listINSERT_END( &( pxReadyTasksLists[ ( pxTCB )->uxPriority ] ), &( ( pxTCB )->xStateListItem ) ); \
-        tracePOST_MOVED_TASK_TO_READY_STATE( pxTCB );                                                      \
-    } while( 0 )
+    #define prvAddTaskToReadyList( pxTCB )                                                                     \
+        do {                                                                                                   \
+            traceMOVED_TASK_TO_READY_STATE( pxTCB );                                                           \
+            taskRECORD_READY_PRIORITY( ( pxTCB )->uxPriority );                                                \
+            listINSERT_END( &( pxReadyTasksLists[ ( pxTCB )->uxPriority ] ), &( ( pxTCB )->xStateListItem ) ); \
+            tracePOST_MOVED_TASK_TO_READY_STATE( pxTCB );                                                      \
+        } while( 0 )
 
 #endif
 /*-----------------------------------------------------------*/
@@ -503,9 +503,9 @@ PRIVILEGED_DATA static List_t xPendingReadyList;                         /**< Ta
 
 
 // Creating Ready List for EDF Scheduler
-#if (configUSE_EDF_SCHEDULER == 1)
+#if ( configUSE_EDF_SCHEDULER == 1 )
 
-PRIVILEGED_DATA static List_t xReadyTasksListEDF;
+    PRIVILEGED_DATA static List_t xReadyTasksListEDF;
 
 #endif
 
@@ -3727,20 +3727,20 @@ static BaseType_t prvCreateIdleTasks( void )
         {
             /* The Idle task is being created using dynamically allocated RAM. */
             #if ( configUSE_EDF_SCHEDULER == 1 )
-            xReturn = xTaskPeriodicCreate( pxIdleTaskFunction,
-                                           cIdleName,
-                                           configMINIMAL_STACK_SIZE,
-                                           ( void * ) NULL,
-                                           portPRIVILEGE_BIT, /* In effect ( tskIDLE_PRIORITY | portPRIVILEGE_BIT ), but tskIDLE_PRIORITY is zero. */
-                                           &xIdleTaskHandles[ xCoreID ],
-                                           initIDLEPeriod );
+                xReturn = xTaskPeriodicCreate( pxIdleTaskFunction,
+                                               cIdleName,
+                                               configMINIMAL_STACK_SIZE,
+                                               ( void * ) NULL,
+                                               portPRIVILEGE_BIT, /* In effect ( tskIDLE_PRIORITY | portPRIVILEGE_BIT ), but tskIDLE_PRIORITY is zero. */
+                                               &xIdleTaskHandles[ xCoreID ],
+                                               initIDLEPeriod );
             #else
-            xReturn = xTaskCreate( pxIdleTaskFunction,
-                                   cIdleName,
-                                   configMINIMAL_STACK_SIZE,
-                                   ( void * ) NULL,
-                                   portPRIVILEGE_BIT, /* In effect ( tskIDLE_PRIORITY | portPRIVILEGE_BIT ), but tskIDLE_PRIORITY is zero. */
-                                   &xIdleTaskHandles[ xCoreID ] );
+                xReturn = xTaskCreate( pxIdleTaskFunction,
+                                       cIdleName,
+                                       configMINIMAL_STACK_SIZE,
+                                       ( void * ) NULL,
+                                       portPRIVILEGE_BIT, /* In effect ( tskIDLE_PRIORITY | portPRIVILEGE_BIT ), but tskIDLE_PRIORITY is zero. */
+                                       &xIdleTaskHandles[ xCoreID ] );
             #endif
         }
         #endif /* configSUPPORT_STATIC_ALLOCATION */
@@ -4904,7 +4904,7 @@ BaseType_t xTaskIncrementTick( void )
 
                     #if ( configUSE_EDF_SCHEDULER == 1 )
                     {
-                        listSET_LIST_ITEM_VALUE(&((pxTCB)->xStateListItem),(pxTCB)->xTaskPeriod + xTaskGetTickCount());
+                        listSET_LIST_ITEM_VALUE( &( ( pxTCB )->xStateListItem ), ( pxTCB )->xTaskPeriod + xTaskGetTickCount() );
                     }
                     #endif
 
@@ -5359,9 +5359,13 @@ BaseType_t xTaskIncrementTick( void )
 
                 /* Select a new task to run. */
                 #if ( configUSE_EDF_SCHEDULER == 1)
-		    pxCurrentTCB = (TCB_t * )listGET_OWNER_OF_HEAD_ENTRY(&(xReadyTasksListEDF));
+                {
+		            pxCurrentTCB = ( TCB_t * ) listGET_OWNER_OF_HEAD_ENTRY( &( xReadyTasksListEDF ) );
+		        }
                 #else
+                {
                     taskSELECT_HIGHEST_PRIORITY_TASK( xCoreID );
+                }
                 #endif
                 traceTASK_SWITCHED_IN();
 
@@ -5924,8 +5928,8 @@ static portTASK_FUNCTION( prvIdleTask, pvParameters )
     {
         #if ( configUSE_EDF_SCHEDULER == 1 )
         {
-            listSET_LIST_ITEM_VALUE(&((pxCurrentTCB)->xStateListItem),((pxCurrentTCB)->xTaskPeriod + xTaskGetTickCount()));
-            listINSERT_END(&(xReadyTasksListEDF),&((pxCurrentTCB)->xStateListItem));
+            listSET_LIST_ITEM_VALUE( &( ( pxCurrentTCB )->xStateListItem ), ( ( pxCurrentTCB )->xTaskPeriod + xTaskGetTickCount() ) );
+            listINSERT_END( &( xReadyTasksListEDF ), &( ( pxCurrentTCB )->xStateListItem ) );
         }
         #endif
 
@@ -6179,7 +6183,7 @@ static void prvInitialiseTaskLists( void )
 
     // Initialize Ready Task for EDF
     #if (configUSE_EDF_SCHEDULER == 1)
-    vListInitialise(&xReadyTasksListEDF);
+        vListInitialise( &xReadyTasksListEDF );
     #endif
 
 
