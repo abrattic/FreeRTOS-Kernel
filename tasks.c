@@ -41,9 +41,6 @@
 #include "timers.h"
 #include "stack_macros.h"
 
-/* Definitions */
-#define initIDLEPeriod  400
-
 /* The default definitions are only available for non-MPU ports. The
  * reason is that the stack alignment requirements vary for different
  * architectures.*/
@@ -294,6 +291,15 @@
             tracePOST_MOVED_TASK_TO_READY_STATE( pxTCB );                           \
         } while( 0 )
 
+#elif ( configUSE_LLREF_SCHEDULER == 1 )
+
+    #define prvAddTaskToReadyList( pxTCB )                                             \
+        do {                                                                           \
+            traceMOVED_TASK_TO_READY_STATE( pxTCB );                                   \
+            vListInsert( &( xReadyTasksListLLREF1 ), &( ( pxTCB )->xStateListItem ) ); \
+            tracePOST_MOVED_TASK_TO_READY_STATE( pxTCB );                              \
+        } while( 0 )
+
 #else
 
     #define prvAddTaskToReadyList( pxTCB )                                                                     \
@@ -467,8 +473,12 @@ typedef struct tskTaskControlBlock       /* The old naming convention is used to
         int iTaskErrno;
     #endif
 
-    #if ( configUSE_EDF_SCHEDULER  == 1 )
+    #if ( configUSE_EDF_SCHEDULER  == 1 || configUSE_LLREF_SCHEDULER == 1)
         TickType_t xTaskPeriod;
+    #endif
+
+    #if ( configUSE_LLREF_SCHEDULER == 1 )
+        TickType_t xTaskCapacity;
     #endif
 } tskTCB;
 
@@ -509,6 +519,15 @@ PRIVILEGED_DATA static List_t xPendingReadyList;                         /**< Ta
 
 #endif
 
+#if ( configUSE_LLREF_SCHEDULER == 1 )
+
+    PRIVILEGED_DATA static List_t xReadyTasksListLLREF1;
+    PRIVILEGED_DATA static List_t xReadyTasksListLLREF2;
+    PRIVILEGED_DATA static List_t * volatile pxReadyTaskListLLREF1;
+    PRIVILEGED_DATA static List_t * volatile pxReadyTaskListLLREF2;
+
+#endif
+
 
 
 #if ( INCLUDE_vTaskDelete == 1 )
@@ -541,6 +560,13 @@ PRIVILEGED_DATA static volatile BaseType_t xNumOfOverflows = ( BaseType_t ) 0;
 PRIVILEGED_DATA static UBaseType_t uxTaskNumber = ( UBaseType_t ) 0U;
 PRIVILEGED_DATA static volatile TickType_t xNextTaskUnblockTime = ( TickType_t ) 0U; /* Initialised to portMAX_DELAY before the scheduler starts. */
 PRIVILEGED_DATA static TaskHandle_t xIdleTaskHandles[ configNUMBER_OF_CORES ];       /**< Holds the handles of the idle tasks.  The idle tasks are created automatically when the scheduler is started. */
+
+#if (configUSE_LLREF_SCHEDULER == 1)
+    PRIVILEGED_DATA static volatile TickType_t xTLPlaneStart = ( TickType_t ) 0U;
+    PRIVILEGED_DATA static volatile TickType_t xTLPlaneEnd = ( TickType_t ) 0U;
+    PRIVILEGED_DATA static volatile TickType_t nextEventTick = ( TickType_t ) 0U;
+    PRIVILEGED_DATA static volatile TickType_t lastEventTick = ( TickType_t ) 0U;
+#endif
 
 /* Improve support for OpenOCD. The kernel tracks Ready tasks via priority lists.
  * For tracking the state of remote threads, OpenOCD uses uxTopUsedPriority
@@ -848,6 +874,84 @@ static void prvAddNewTaskToReadyList( TCB_t * pxNewTCB ) PRIVILEGED_FUNCTION;
                                                         size_t n );
 
 #endif /* #if ( ( configUSE_TRACE_FACILITY == 1 ) && ( configUSE_STATS_FORMATTING_FUNCTIONS > 0 ) ) */
+/*-----------------------------------------------------------*/
+
+#if ( configUSE_LLREF_SCHEDULER == 1 )
+    /*
+     * Called at every nextEventTick tick
+     */
+    void funcEventHandle( void )
+    {
+        /* Update the running task local remaining execution time: */
+        int tmp = listGET_LIST_ITEM_VALUE( &( pxCurrentTCB->xStateListItem ) ) - ( lastEventTick - xTaskGetTickCount() );
+        listSET_LIST_ITEM_VALUE( &( ( pxCurrentTCB )->xStateListItem ), tmp );
+
+        /* Sort Ready list by POP and PUSH the running task: */
+        uxListRemove( &( pxCurrentTCB->xStateListItem ) );
+        prvAddTaskToReadyList( pxCurrentTCB );
+
+        /* Update last event time: */
+        lastEventTick = nextEventTick;
+
+        /* Calc next event B time: */
+        TCB_t * pxTCB = listGET_OWNER_OF_HEAD_ENTRY( &xReadyTasksListLLREF1 );
+        TickType_t u = ( TickType_t ) listGET_LIST_ITEM_VALUE( &( ( pxTCB )->xStateListItem ) );
+        nextEventTick = xTLPlaneStart + ( u * ( xTLPlaneEnd - xTLPlaneStart) );
+
+        /* Force context switch: */
+        portYIELD();
+    }
+
+    void initializeAndSortLLREF( void )
+    {
+        List_t *pxTemp;
+
+        /* The delayed tasks list should be empty when the lists are switched. */
+        configASSERT( ( listLIST_IS_EMPTY( pxReadyTaskListLLREF2 ) ) );
+
+        while( listLIST_IS_EMPTY( pxReadyTaskListLLREF1 ) )
+        {
+            TCB_t *pxTCB;
+            uxListRemove( &( ( pxTCB )->xStateListItem ) );
+
+            /* Update the task local remaining execution time: */
+            int tmp = ( ( pxTCB )->xTaskPeriod / ( pxTCB )->xTaskCapacity ) * ( lastEventTick - xTaskGetTickCount() );
+            listSET_LIST_ITEM_VALUE( &( ( pxCurrentTCB )->xStateListItem ), tmp );
+
+            /* Add task to the other ready list (sort order): */
+            vListInsert( pxReadyTaskListLLREF2, &( ( pxTCB )->xStateListItem ) );
+        }
+
+        pxTemp = pxReadyTaskListLLREF1;
+        pxReadyTaskListLLREF1 = pxReadyTaskListLLREF2;
+        pxReadyTaskListLLREF2 = pxTemp;
+    }
+
+    /*
+     * Called at every xTLPlaneStart tick
+     */
+    void funcNewTLPlane( void )
+    {
+        /* Calculate the T-L plane end: */
+        xTLPlaneEnd = ( ( xTLPlaneStart + pxCurrentTCB->xTaskPeriod ) < xNextTaskUnblockTime ) ?
+                      ( xTLPlaneStart + pxCurrentTCB->xTaskPeriod ) :
+                      ( xNextTaskUnblockTime );
+
+        /* Initialize local execution time left for the tasks in Ready List and sort it: */
+        initializeAndSortLLREF();
+
+        /* Update last event time: */
+        lastEventTick = nextEventTick;
+
+        /* Calculate next event B time: */
+        TCB_t * pxTCB = ( TCB_t * ) listGET_OWNER_OF_HEAD_ENTRY( &xReadyTasksListLLREF1 );
+        TickType_t u = ( TickType_t ) listGET_LIST_ITEM_VALUE( &( pxTCB->xStateListItem ) );
+        nextEventTick = xTLPlaneStart + ( u * ( xTLPlaneEnd - xTLPlaneStart ) );
+
+        /* Force Context Switch */
+        portYIELD();
+    }
+#endif
 /*-----------------------------------------------------------*/
 
 #if ( configNUMBER_OF_CORES > 1 )
@@ -1882,6 +1986,51 @@ static void prvAddNewTaskToReadyList( TCB_t * pxNewTCB ) PRIVILEGED_FUNCTION;
 
             return xReturn;
         }
+    #endif
+
+    #if ( configUSE_LLREF_SCHEDULER == 1 )
+        BaseType_t xTaskLLREFCreate( TaskFunction_t pxTaskCode,
+                                     const char * const pcName,
+                                     const configSTACK_DEPTH_TYPE uxStackDepth,
+                                     void * const pvParameters,
+                                     UBaseType_t uxPriority,
+                                     TaskHandle_t * const pxCreatedTask,
+                                     TickType_t period,
+                                     TickType_t capacity )
+            {
+                TCB_t * pxNewTCB;
+                BaseType_t xReturn;
+
+                traceENTER_xTaskCreate( pxTaskCode, pcName, uxStackDepth, pvParameters, uxPriority, pxCreatedTask );
+
+                pxNewTCB = prvCreateTask( pxTaskCode, pcName, uxStackDepth, pvParameters, uxPriority, pxCreatedTask );
+
+                if( pxNewTCB != NULL )
+                {
+                    #if ( ( configNUMBER_OF_CORES > 1 ) && ( configUSE_CORE_AFFINITY == 1 ) )
+                    {
+                        /* Set the task's affinity before scheduling it. */
+                        pxNewTCB->uxCoreAffinityMask = configTASK_DEFAULT_CORE_AFFINITY;
+                    }
+                    #endif
+
+                    pxNewTCB->xTaskPeriod = period;
+                    pxNewTCB->xTaskCapacity = capacity;
+
+                    listSET_LIST_ITEM_VALUE( &( ( pxNewTCB )->xStateListItem ), 0 );
+
+                    prvAddNewTaskToReadyList( pxNewTCB );
+                    xReturn = pdPASS;
+                }
+                else
+                {
+                    xReturn = errCOULD_NOT_ALLOCATE_REQUIRED_MEMORY;
+                }
+
+                traceRETURN_xTaskCreate( xReturn );
+
+                return xReturn;
+            }
     #endif
 
 #endif /* configSUPPORT_DYNAMIC_ALLOCATION */
@@ -3727,6 +3876,8 @@ static BaseType_t prvCreateIdleTasks( void )
         {
             /* The Idle task is being created using dynamically allocated RAM. */
             #if ( configUSE_EDF_SCHEDULER == 1 )
+            {
+                TickType_t initIDLEPeriod = 400;
                 xReturn = xTaskPeriodicCreate( pxIdleTaskFunction,
                                                cIdleName,
                                                configMINIMAL_STACK_SIZE,
@@ -3734,13 +3885,30 @@ static BaseType_t prvCreateIdleTasks( void )
                                                portPRIVILEGE_BIT, /* In effect ( tskIDLE_PRIORITY | portPRIVILEGE_BIT ), but tskIDLE_PRIORITY is zero. */
                                                &xIdleTaskHandles[ xCoreID ],
                                                initIDLEPeriod );
+            }
+            #elif ( configUSE_LLREF_SCHEDULER == 1 )
+            {
+                TickType_t initIDLEPeriod = 0;
+                TickType_t initIDLECapacity = 1;
+
+                xReturn = xTaskLLREFCreate( pxIdleTaskFunction,
+                                            cIdleName,
+                                            configMINIMAL_STACK_SIZE,
+                                            ( void * ) NULL,
+                                            portPRIVILEGE_BIT, /* In effect ( tskIDLE_PRIORITY | portPRIVILEGE_BIT ), but tskIDLE_PRIORITY is zero. */
+                                            &xIdleTaskHandles[ xCoreID ],
+                                            initIDLEPeriod,
+                                            initIDLECapacity );
+            }
             #else
+            {
                 xReturn = xTaskCreate( pxIdleTaskFunction,
                                        cIdleName,
                                        configMINIMAL_STACK_SIZE,
                                        ( void * ) NULL,
                                        portPRIVILEGE_BIT, /* In effect ( tskIDLE_PRIORITY | portPRIVILEGE_BIT ), but tskIDLE_PRIORITY is zero. */
                                        &xIdleTaskHandles[ xCoreID ] );
+            }
             #endif
         }
         #endif /* configSUPPORT_STATIC_ALLOCATION */
@@ -4842,6 +5010,20 @@ BaseType_t xTaskIncrementTick( void )
         {
             mtCOVERAGE_TEST_MARKER();
         }
+
+        #if ( configUSE_LLREF_SCHEDULER == 1 )
+        {
+            if( xTickCount == xTLPlaneStart )
+            {
+                funcNewTLPlane();
+            }
+
+            if( xTickCount == xTLPlaneStart )
+            {
+                funcEventHandle();
+            }
+        }
+        #endif
 
         /* See if this tick has made a timeout expire.  Tasks are stored in
          * the  queue in the order of their wake time - meaning once one task
@@ -6183,9 +6365,20 @@ static void prvInitialiseTaskLists( void )
 
     // Initialize Ready Task for EDF
     #if (configUSE_EDF_SCHEDULER == 1)
+    {
         vListInitialise( &xReadyTasksListEDF );
+    }
     #endif
 
+    #if ( configUSE_LLREF_SCHEDULER == 1 )
+    {
+        vListInitialise( &xReadyTasksListLLREF1 );
+        vListInitialise( &xReadyTasksListLLREF1 );
+
+        pxReadyTaskListLLREF1 = &xReadyTasksListLLREF1;
+        pxReadyTaskListLLREF2 = &xReadyTasksListLLREF2;
+    }
+    #endif
 
     for( uxPriority = ( UBaseType_t ) 0U; uxPriority < ( UBaseType_t ) configMAX_PRIORITIES; uxPriority++ )
     {
